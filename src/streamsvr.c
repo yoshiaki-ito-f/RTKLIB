@@ -35,6 +35,17 @@
 #define _POSIX_C_SOURCE 200112L
 #include "rtklib.h"
 
+static obscorr_t *svr_obscorr=NULL; /* observation correction (NULL:disabled) */
+
+/* set observation data correction ---------------------------------------------
+* set observation correction control applied to converted observation data
+* args   : obscorr_t *oc    I   observation correction control (NULL:disable)
+* return : none
+*-----------------------------------------------------------------------------*/
+extern void strsvrsetcorr(obscorr_t *oc)
+{
+    svr_obscorr=oc;
+}
 /* test observation data message ---------------------------------------------*/
 static int is_obsmsg(int msg)
 {
@@ -445,7 +456,11 @@ static void strconv(stream_t *str, strconv_t *conv, uint8_t *buff, int n)
         }
         /* write obs and nav data messages to stream */
         switch (ret) {
-            case 1: write_obs(conv->out.time,str,conv); break;
+            case 1:
+                /* apply observation data corrections */
+                if (svr_obscorr) obscorr_apply(svr_obscorr,conv);
+                write_obs(conv->out.time,str,conv);
+                break;
             case 2: write_nav(conv->out.time,str,conv); break;
         }
     }
@@ -541,6 +556,9 @@ static void *strsvrthread(void *arg)
         for (i=0;i<svr->nstr;i++) {
             periodic_cmd(cyc*svr->cycle,svr->cmds_periodic[i],svr->stream+i);
         }
+        /* test update of observation correction files and reload them */
+        if (svr_obscorr) obscorr_reload(svr_obscorr);
+
         /* write nmea messages to input stream */
         if (svr->nmeacycle>0&&(int)(tick-tick_nmea)>=svr->nmeacycle) {
             sol_nmea.stat=SOLQ_SINGLE;
