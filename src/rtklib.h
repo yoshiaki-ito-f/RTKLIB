@@ -1047,6 +1047,11 @@ typedef struct {        /* processing options type */
     int navsys;         /* navigation system */
     double elmin;       /* elevation mask angle (rad) */
     snrmask_t snrmask;  /* SNR mask */
+    int refsatmode;     /* reference satellite selection
+                           (0:elevation,1:snr,2:elevation2nd,3:random,4:mask,5:pinned) */
+    double refsatelmin; /* min elevation of refsat candidates (rad) (mode 3,5) */
+    int refsatprn;      /* pinned refsat satellite no, 0:auto (mode 5) */
+    int qzsmerge;       /* merge QZSS into GPS DD group (0:off,1:on) */
     int sateph;         /* satellite ephemeris/clock (EPHOPT_???) */
     int modear;         /* AR mode (0:off,1:continuous,2:instantaneous,3:fix and hold,4:ppp-ar) */
     int glomodear;      /* GLONASS AR mode (0:off,1:on,2:auto cal,3:ext cal) */
@@ -1235,6 +1240,7 @@ typedef struct {        /* RTK control/result type */
     char holdamb;       /* set if fix-and-hold has occurred at least once */
     ambc_t ambc[MAXSAT]; /* ambiguity control */
     ssat_t ssat[MAXSAT]; /* satellite status */
+    int refsat[6][NFREQ*2]; /* reference satellite (satno) per sys group/freq, 0:none */
     int neb;            /* bytes in error message buffer */
     char errbuf[MAXERRMSG]; /* error message buffer */
     prcopt_t opt;       /* processing options */

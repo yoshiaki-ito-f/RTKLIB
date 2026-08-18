@@ -20,8 +20,8 @@
 #include <stdarg.h>
 #include "rtklib.h"
 
-#define PROGNAME    "rnx2rtkp"          /* program name */
-#define MAXFILE     16                  /* max number of input files */
+#define PROGNAME    "_rnx2rtkp"          /* program name */
+#define MAXFILE     500                  /* max number of input files */
 
 /* help text -----------------------------------------------------------------*/
 static const char *help[]={
