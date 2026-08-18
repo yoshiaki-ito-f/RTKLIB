@@ -1047,6 +1047,11 @@ typedef struct {        /* processing options type */
     int navsys;         /* navigation system */
     double elmin;       /* elevation mask angle (rad) */
     snrmask_t snrmask;  /* SNR mask */
+    int refsatmode;     /* reference satellite selection
+                           (0:elevation,1:snr,2:elevation2nd,3:random,4:mask,5:pinned) */
+    double refsatelmin; /* min elevation of refsat candidates (rad) (mode 3,5) */
+    int refsatprn;      /* pinned refsat satellite no, 0:auto (mode 5) */
+    int qzsmerge;       /* merge QZSS into GPS DD group (0:off,1:on) */
     int sateph;         /* satellite ephemeris/clock (EPHOPT_???) */
     int modear;         /* AR mode (0:off,1:continuous,2:instantaneous,3:fix and hold,4:ppp-ar) */
     int glomodear;      /* GLONASS AR mode (0:off,1:on,2:auto cal,3:ext cal) */
@@ -1235,6 +1240,7 @@ typedef struct {        /* RTK control/result type */
     char holdamb;       /* set if fix-and-hold has occurred at least once */
     ambc_t ambc[MAXSAT]; /* ambiguity control */
     ssat_t ssat[MAXSAT]; /* satellite status */
+    int refsat[6][NFREQ*2]; /* reference satellite (satno) per sys group/freq, 0:none */
     int neb;            /* bytes in error message buffer */
     char errbuf[MAXERRMSG]; /* error message buffer */
     prcopt_t opt;       /* processing options */
@@ -1301,6 +1307,39 @@ typedef struct {        /* stream converter type */
     raw_t raw;          /* raw  input data buffer */
     rtcm_t out;         /* rtcm output data buffer */
 } strconv_t;
+
+typedef struct {        /* observation correction grid (one satellite/band) */
+    float *el_lo,*el_hi; /* elevation cell bounds (deg) [nel] (sorted) */
+    float *az_lo,*az_hi; /* azimuth cell bounds (deg) [naz] (sorted) */
+    int nel,naz;        /* number of elevation/azimuth cells */
+    int uniform;        /* uniform grid flag (1:direct index lookup) */
+    float el0,del;      /* elevation origin/interval (deg) (uniform) */
+    float az0,daz;      /* azimuth origin/interval (deg) (uniform) */
+    float *ph;          /* carrier-phase corrections (cycle) [nel*naz] (NAN:none) */
+    float *pr;          /* pseudorange corrections (m) [nel*naz] */
+    int32_t *cnt;       /* number of data in cells [nel*naz] */
+} corrgrid_t;
+
+#define OBSCORR_NBAND 2 /* number of correction frequency bands (L1,L2) */
+
+typedef struct {        /* observation correction table */
+    corrgrid_t *grid[MAXSAT][OBSCORR_NBAND]; /* correction grids (NULL:none) */
+    gtime_t loadtime;   /* load time */
+} corrtab_t;
+
+typedef struct {        /* observation correction control type */
+    char file[1024];    /* correction file path */
+    char navfile[1024]; /* rinex navigation file path ("":no file) */
+    int reload_int;     /* reload check interval (s) */
+    time_t mtime;       /* correction file mtime at last load */
+    time_t navmtime;    /* navigation file mtime at last load */
+    uint32_t tick_reload; /* last reload check tick */
+    corrtab_t *tab;     /* correction table (NULL:not loaded) */
+    nav_t navf;         /* navigation data from rinex navigation file */
+    int stat;           /* load status (0:none,1:loaded,-1:error) */
+    uint32_t tick_warn[4]; /* warning rate-limit window start ticks */
+    uint32_t nwarn[4];  /* warning counts in current windows */
+} obscorr_t;
 
 typedef struct {        /* stream server type */
     int state;          /* server state (0:stop,1:running) */
@@ -1902,6 +1941,16 @@ EXPORT void strsvrstat (strsvr_t *svr, int *stat, int *log_stat, int *byte,
 EXPORT strconv_t *strconvnew(int itype, int otype, const char *msgs, int staid,
                              int stasel, const char *opt);
 EXPORT void strconvfree(strconv_t *conv);
+EXPORT void strsvrsetcorr(obscorr_t *oc);
+
+/* observation data correction functions --------------------------------------*/
+EXPORT int  obscorr_init  (obscorr_t *oc, const char *file, const char *navfile,
+                           int reload_int);
+EXPORT void obscorr_free  (obscorr_t *oc);
+EXPORT int  obscorr_reload(obscorr_t *oc);
+EXPORT int  obscorr_lookup(const corrtab_t *tab, int sat, int band, double el,
+                           double az, double *ph, double *pr, int *cnt);
+EXPORT void obscorr_apply (obscorr_t *oc, strconv_t *conv);
 
 /* rtk server functions ------------------------------------------------------*/
 EXPORT int  rtksvrinit  (rtksvr_t *svr);

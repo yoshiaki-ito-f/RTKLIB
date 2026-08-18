@@ -317,6 +317,19 @@ extern int rtkoutstat(rtk_t *rtk, int level, char *buff)
                            k<rtk->nx?rtk->P[k+k*rtk->nx]:0,ssat->icbias[j]);
             }
         }
+        /* Write reference (pivot) satellite of each sys group and frequency.
+           The DD residual above is stored on the non-reference satellite only,
+           so the reference itself carries resc=resp=0 and cannot be identified
+           from $SAT alone.  Needed to reconstruct the DD equations offline
+           (e.g. for multipath hemispherical map construction). */
+        for (int m=0;m<6;m++) for (int f=0;f<NFREQ*2;f++) {
+            int satno=rtk->refsat[m][f];
+            if (satno<=0) continue;
+            ssat=rtk->ssat+satno-1;
+            satno2id(satno,id);
+            p+=sprintf(p,"$REFSAT,%d,%.3f,%d,%d,%s,%.1f,%.1f\n",week,tow,m,f,id,
+                       ssat->azel[0]*R2D,ssat->azel[1]*R2D);
+        }
     }
 
     return (int)(p-buff);
@@ -1201,6 +1214,17 @@ static double prectrop(gtime_t time, const double *pos, int r,
     dtdx[0]=m_w;
     return m_w*x[i];
 }
+/* sys group for QZSS: QZSGRP_OWN (default) or QZSGRP_GPS (merged with GPS).
+ * QZSS is GPS-compatible (same L1C/A, L2C, L5 center frequencies), so merging
+ * it into the GPS group lets QZSS satellites form double differences with GPS
+ * and act as reference satellite.  Set from opt->qzsmerge at the top of
+ * relpos(), which covers every test_sys() caller (ddres/ddidx/restamb/holdamb).
+ * note: file scope, so a multi-threaded rtksvr with several rtk_t instances
+ *       would share it.  rnx2rtkp post-processing is single threaded.        */
+#define QZSGRP_OWN  4
+#define QZSGRP_GPS  0
+static int qzs_group=QZSGRP_OWN;
+
 /* test satellite system (m=0:GPS/SBS,1:GLO,2:GAL,3:BDS,4:QZS,5:IRN) ---------*/
 static int test_sys(int sys, int m)
 {
@@ -1210,10 +1234,133 @@ static int test_sys(int sys, int m)
         case SYS_GLO: return m==1;
         case SYS_GAL: return m==2;
         case SYS_CMP: return m==3;
-        case SYS_QZS: return m==4;
+        case SYS_QZS: return m==qzs_group;
         case SYS_IRN: return m==5;
     }
     return 0;
+}
+/* reference satellite (pivot) selection -------------------------------------
+ * The double-differenced phase residual is v^pq = m(az_p,el_p)-m(az_q,el_q)+e
+ * with q the reference satellite, so any multipath on the reference leaks into
+ * every DD of the group with reversed sign.  For multipath hemispherical map
+ * (MHM) construction at a site with a local obstruction (e.g. a pillar due
+ * north) the default "highest elevation" rule tends to put the reference right
+ * inside the contaminated region.  These modes let the rule be swapped from
+ * the config file (pos1-refsatmode).                                         */
+#define REFSAT_MAXEL   0    /* highest elevation (RTKLIB default) */
+#define REFSAT_MAXSNR  1    /* highest rover SNR */
+#define REFSAT_EL2ND   2    /* 2nd highest elevation (diagnostic) */
+#define REFSAT_RANDOM  3    /* random among candidates above refsatelmin (diagnostic) */
+#define REFSAT_MASK    4    /* highest elevation outside the az-el mask */
+#define REFSAT_PINNED  5    /* pinned satellite (refsatprn), else highest QZSS */
+
+static unsigned int refsat_rng=0;
+
+/* portable LCG, so random reference satellite selection is reproducible
+ * across platforms and reruns (rand() is not) --------------------------------*/
+static unsigned int nextrand(void)
+{
+    refsat_rng=refsat_rng*1103515245u+12345u;
+    return (refsat_rng>>16)&0x7fffu;
+}
+/* az-el obstruction mask: 1 if (az,el) is inside the blocked region ----------
+ * TODO: replace the hard-coded sector with a grid loaded from file.          */
+static int inrefsatmask(double az, double el)
+{
+    double a=az*R2D,e=el*R2D;
+
+    while (a<   0.0) a+=360.0;
+    while (a>=360.0) a-=360.0;
+    /* placeholder: pillar due north, az 348-12 deg, above 35 deg elevation */
+    return e>35.0&&(a>=348.0||a<=12.0);
+}
+/* select reference satellite of sys group m / freq f -------------------------
+ * returns index into [0,ns), or -1 if no valid satellite in the group.
+ * All modes fall back to REFSAT_MAXEL when their own rule finds no candidate,
+ * so the solution never loses a group just because of the selection rule.    */
+static int selrefsat(const rtk_t *rtk, const int *sat, const double *azel,
+                     const int *iu, const int *ir, double *y,
+                     int ns, int m, int f, int frq, int nf)
+{
+    const prcopt_t *opt=&rtk->opt;
+    int j,k,n=0,cand[MAXOBS],nsel=0,sel[MAXOBS],i=-1,i2=-1,sysj;
+
+    /* gather valid candidates: same sys group, valid obs, and (as in the
+       original inline loop) SBAS never serves as reference */
+    for (j=0;j<ns;j++) {
+        sysj=rtk->ssat[sat[j]-1].sys;
+        if (!test_sys(sysj,m)||sysj==SYS_SBS) continue;
+        if (!validobs(iu[j],ir[j],f,nf,y)) continue;
+        cand[n++]=j;
+    }
+    if (n<=0) return -1;
+
+    switch (opt->refsatmode) {
+
+        case REFSAT_MAXSNR:
+            for (k=0;k<n;k++) {
+                j=cand[k];
+                /* skip sat with slip unless no other valid sat */
+                if (i>=0&&rtk->ssat[sat[j]-1].slip[frq]&LLI_SLIP) continue;
+                if (i<0||rtk->ssat[sat[j]-1].snr_rover[frq]>=
+                         rtk->ssat[sat[i]-1].snr_rover[frq]) i=j;
+            }
+            return i;
+
+        case REFSAT_EL2ND:
+            for (k=0;k<n;k++) {
+                j=cand[k];
+                if (i>=0&&rtk->ssat[sat[j]-1].slip[frq]&LLI_SLIP) continue;
+                if (i<0||azel[1+iu[j]*2]>=azel[1+iu[i]*2]) {i2=i; i=j;}
+                else if (i2<0||azel[1+iu[j]*2]>=azel[1+iu[i2]*2]) i2=j;
+            }
+            if (i2>=0) return i2;
+            return i;   /* only one candidate: use it */
+
+        case REFSAT_RANDOM:
+            for (k=0;k<n;k++) {
+                j=cand[k];
+                if (azel[1+iu[j]*2]<opt->refsatelmin) continue;
+                if (rtk->ssat[sat[j]-1].slip[frq]&LLI_SLIP) continue;
+                sel[nsel++]=j;
+            }
+            if (nsel>0) return sel[(int)(nextrand()%(unsigned int)nsel)];
+            break;      /* no candidate -> fall through to REFSAT_MAXEL */
+
+        case REFSAT_MASK:
+            for (k=0;k<n;k++) {
+                j=cand[k];
+                if (inrefsatmask(azel[iu[j]*2],azel[1+iu[j]*2])) continue;
+                if (i>=0&&rtk->ssat[sat[j]-1].slip[frq]&LLI_SLIP) continue;
+                if (i<0||azel[1+iu[j]*2]>=azel[1+iu[i]*2]) i=j;
+            }
+            if (i>=0) return i;
+            break;      /* all masked -> fall through */
+
+        case REFSAT_PINNED:
+            /* (a) the pinned satellite takes precedence (e.g. a QZSS GEO) */
+            if (opt->refsatprn>0) {
+                for (k=0;k<n;k++) if (sat[cand[k]]==opt->refsatprn) return cand[k];
+            }
+            /* (b) else the highest QZSS above the elevation threshold */
+            for (k=0;k<n;k++) {
+                j=cand[k];
+                if (rtk->ssat[sat[j]-1].sys!=SYS_QZS) continue;
+                if (azel[1+iu[j]*2]<opt->refsatelmin) continue;
+                if (i>=0&&rtk->ssat[sat[j]-1].slip[frq]&LLI_SLIP) continue;
+                if (i<0||azel[1+iu[j]*2]>=azel[1+iu[i]*2]) i=j;
+            }
+            if (i>=0) return i;
+            break;      /* no QZSS -> fall through */
+    }
+    /* default and fallback: highest elevation (original RTKLIB behaviour) */
+    for (i=-1,k=0;k<n;k++) {
+        j=cand[k];
+        /* skip sat with slip unless no other valid sat */
+        if (i>=0&&rtk->ssat[sat[j]-1].slip[frq]&LLI_SLIP) continue;
+        if (i<0||azel[1+iu[j]*2]>=azel[1+iu[i]*2]) i=j;
+    }
+    return i;
 }
 /* double-differenced residuals and partial derivatives  -----------------------------------
         O rtk->ssat[i].resp[j] = residual pseudorange error
@@ -1258,6 +1405,8 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
     for (i=0;i<MAXSAT;i++) for (j=0;j<NFREQ;j++) {
         rtk->ssat[i].resp[j]=rtk->ssat[i].resc[j]=0.0;
     }
+    /* zero out reference satellites of the previous epoch */
+    for (i=0;i<6;i++) for (j=0;j<NFREQ*2;j++) rtk->refsat[i][j]=0;
     /* compute factors of ionospheric and tropospheric delay
            - only used if kalman filter contains states for ION and TROP delays
            usually insignificant for short baselines (<10km)*/
@@ -1315,8 +1464,21 @@ static int ddres(rtk_t *rtk, const obsd_t *obs, double dt, const double *x,
                         minvar=refvar;
                     }
                 }
+            /* seed the RNG from (epoch,m,f) so the random reference satellite
+               is a pure function of the epoch: ddres() runs several times per
+               epoch (float update, then fixed-solution validation) and all of
+               them must agree, or H and v become inconsistent.  It also makes
+               reruns bit-for-bit reproducible. */
+            if (opt->refsatmode==REFSAT_RANDOM) {
+                int week; double tow=time2gpst(rtk->sol.time,&week);
+                refsat_rng=(unsigned int)(week*604800.0+tow)*2654435761u
+                          ^((unsigned int)m<<16)^(unsigned int)f;
+                nextrand();  /* warm up */
             }
+            /* find reference satellite, set to i */
+            i=selrefsat(rtk,sat,azel,iu,ir,y,ns,m,f,frq,nf);
             if (i<0) continue;
+            rtk->refsat[m][f]=sat[i];
 
             /* calculate double differences of residuals (code/phase) for each sat */
             for (j=0;j<ns;j++) {
@@ -2072,6 +2234,11 @@ static int relpos(rtk_t *rtk, const obsd_t *obs, int nu, int nr,
     int nf=opt->ionoopt==IONOOPT_IFLC?1:opt->nf;
 
     trace(3,"relpos  : nu=%d nr=%d\n",nu,nr);
+
+    /* select the sys group QZSS belongs to.  Set here because every
+       test_sys() caller (ddres/ddidx/restamb/holdamb) runs below this point,
+       so DD generation, AR and hold switch together. */
+    qzs_group=opt->qzsmerge?QZSGRP_GPS:QZSGRP_OWN;
 
     /* define local matrices, n=total observations, base + rover */
     rs=mat(6,n);            /* range to satellites */

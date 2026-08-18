@@ -35,10 +35,11 @@
 static prcopt_t prcopt_;
 static solopt_t solopt_;
 static filopt_t filopt_;
-static double elmask_,elmaskar_,elmaskhold_;
+static double elmask_,elmaskar_,elmaskhold_,refsatelmin_;
 static double antpos_[2][3];
 static char exsats_[1024];
 static char snrmask_[NFREQ][1024];
+static char refsatprn_[8];
 
 /* system options table ------------------------------------------------------*/
 #define SWTOPT  "0:off,1:on"
@@ -50,7 +51,7 @@ static char snrmask_[NFREQ][1024];
 #define EPHOPT  "0:brdc,1:precise,2:brdc+sbas,3:brdc+ssrapc,4:brdc+ssrcom"
 #define NAVOPT  "1:gps+2:sbas+4:glo+8:gal+16:qzs+32:bds+64:navic"
 #define GAROPT  "0:off,1:on,2:autocal,3:fix-and-hold"
-#define WEIGHTOPT "0:elevation,1:snr"
+#define REFSATOPT "0:elevation,1:snr,2:elevation2nd,3:random,4:mask,5:pinned"
 #define SOLOPT  "0:llh,1:xyz,2:enu,3:nmea"
 #define TSYOPT  "0:gpst,1:utc,2:jst"
 #define TFTOPT  "0:tow,1:hms"
@@ -75,6 +76,10 @@ EXPORT opt_t sysopts[]={
     {"pos1-snrmask_L2", 2,  (void *)snrmask_[1],         ""     },
     {"pos1-snrmask_L5", 2,  (void *)snrmask_[2],         ""     },
     {"pos1-snrmask_L6", 2,  (void *)snrmask_[3],         ""     },
+    {"pos1-refsatmode", 3,  (void *)&prcopt_.refsatmode, REFSATOPT},
+    {"pos1-refsatelmin",1,  (void *)&refsatelmin_,       "deg"  },
+    {"pos1-refsatprn",  2,  (void *)refsatprn_,          ""     },
+    {"pos1-qzsmerge",   3,  (void *)&prcopt_.qzsmerge,   SWTOPT },
     {"pos1-dynamics",   3,  (void *)&prcopt_.dynamics,   SWTOPT },
     {"pos1-tidecorr",   0,  (void *)&prcopt_.tidecorr,   TIDEOPT},
     {"pos1-ionoopt",    3,  (void *)&prcopt_.ionoopt,    IONOPT },
@@ -414,7 +419,9 @@ static void buff2sysopts(void)
     prcopt_.elmin     =elmask_    *D2R;
     prcopt_.elmaskar  =elmaskar_  *D2R;
     prcopt_.elmaskhold=elmaskhold_*D2R;
-    
+    prcopt_.refsatelmin=refsatelmin_*D2R;
+    prcopt_.refsatprn =*refsatprn_?satid2no(refsatprn_):0;
+
     for (i=0;i<2;i++) {
         ps=i==0?prcopt_.rovpos:prcopt_.refpos;
         rr=i==0?prcopt_.ru:prcopt_.rb;
@@ -472,7 +479,10 @@ static void sysopts2buff(void)
     elmask_    =prcopt_.elmin     *R2D;
     elmaskar_  =prcopt_.elmaskar  *R2D;
     elmaskhold_=prcopt_.elmaskhold*R2D;
-    
+    refsatelmin_=prcopt_.refsatelmin*R2D;
+    if (prcopt_.refsatprn>0) satno2id(prcopt_.refsatprn,refsatprn_);
+    else refsatprn_[0]='\0';
+
     for (i=0;i<2;i++) {
         ps=i==0?prcopt_.rovpos:prcopt_.refpos;
         rr=i==0?prcopt_.ru:prcopt_.rb;
@@ -535,6 +545,8 @@ extern void resetsysopts(void)
     elmask_=15.0;
     elmaskar_=0.0;
     elmaskhold_=0.0;
+    refsatelmin_=30.0;
+    refsatprn_[0]='\0';
     for (i=0;i<2;i++) for (j=0;j<3;j++) {
         antpos_[i][j]=0.0;
     }

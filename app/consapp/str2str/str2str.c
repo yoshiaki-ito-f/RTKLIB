@@ -42,6 +42,7 @@
 
 /* global variables ----------------------------------------------------------*/
 static strsvr_t strsvr;                /* stream server */
+static obscorr_t obscorr;              /* observation data correction */
 static volatile int intrflg=0;         /* interrupt flag */
 
 /* help text -----------------------------------------------------------------*/
@@ -114,6 +115,9 @@ static const char *help[]={
 " -l  local_dir     ftp/http local directory []",
 " -x  proxy_addr    http/ntrip proxy address [no]",
 " -b  str_no        relay back messages from output str to input str [no]",
+" -corr file        observation correction file (csv or binary) [no]",
+" -corrint sec      correction file reload check interval (s) [30]",
+" -navf file        rinex navigation file for satellite el/az [no]",
 " -t  level         trace level [0]",
 " -fl file          log file [str2str.trace]",
 " --daemon          detach from the console",
@@ -292,6 +296,8 @@ int main(int argc, char **argv)
     char *local="",*proxy="",*opt="",buff[256],*p;
     char strmsg[MAXSTRMSG]="",*antinfo="",*rcvinfo="";
     char *ant[]={"","",""},*rcv[]={"","",""},*logfile="";
+    char *corrfile="",*navfile="";
+    int corrint=30;
     int i,j,n=0,dispint=5000,trlevel=0,opts[]={10000,10000,2000,32768,10,0,30,0};
     int types[MAXSTR]={STR_FILE,STR_FILE},stat[MAXSTR]={0},log_stat[MAXSTR]={0};
     int byte[MAXSTR]={0},bps[MAXSTR]={0},fmts[MAXSTR]={0},sta=0;
@@ -362,6 +368,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i],"-l"  )&&i+1<argc) local=argv[++i];
         else if (!strcmp(argv[i],"-x"  )&&i+1<argc) proxy=argv[++i];
         else if (!strcmp(argv[i],"-b"  )&&i+1<argc) opts[7]=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"-corr"   )&&i+1<argc) corrfile=argv[++i];
+        else if (!strcmp(argv[i],"-corrint")&&i+1<argc) corrint=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"-navf"   )&&i+1<argc) navfile=argv[++i];
         else if (!strcmp(argv[i],"-fl" )&&i+1<argc) logfile=argv[++i];
         else if (!strcmp(argv[i],"-t"  )&&i+1<argc) trlevel=atoi(argv[++i]);
         else if (!strcmp(argv[i], "--daemon")) daemon=1;
@@ -423,7 +432,16 @@ int main(int argc, char **argv)
     
     strsetdir(local);
     strsetproxy(proxy);
-    
+
+    /* initialize observation data correction */
+    if (*corrfile) {
+        if (!obscorr_init(&obscorr,corrfile,navfile,corrint)) {
+            fprintf(stderr,"correction file read error %s (pass-through)\n",
+                    corrfile);
+        }
+        strsvrsetcorr(&obscorr);
+    }
+
     for (i=0;i<MAXSTR;i++) {
         if (*cmdfile[i]) readcmd(cmdfile[i],cmds[i], sizeof(cmd_strs[0]),0);
         if (*cmdfile[i]) readcmd(cmdfile[i],cmds_periodic[i], sizeof(cmd_periodic_strs[0]), 2);
@@ -457,6 +475,10 @@ int main(int argc, char **argv)
     
     for (i=0;i<n;i++) {
         strconvfree(conv[i]);
+    }
+    if (*corrfile) {
+        strsvrsetcorr(NULL);
+        obscorr_free(&obscorr);
     }
     if (trlevel>0) {
         traceclose();
